@@ -1,0 +1,211 @@
+//SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.15;
+
+//this contract is set up to create one year sidecar contracts, unless a custom termination
+//date is provided (expressed in seconds from effective date).
+
+contract SmartQuotaShare {
+
+    uint ONE_YEAR_IN_SECONDS = 31536000;
+
+    struct Cedent {
+        string name;
+        address cedentAddress;
+    }
+
+    struct Reinsurer {
+        string name;
+        address reinsurerAddress;
+    }
+
+    struct QuotaShareAgreement {
+        string name;
+        Cedent cedent;
+        Reinsurer reinsurer;
+        uint8 quotaShare;
+        bool commuted;
+        uint balanceSettlementAccount;
+        uint balanceCollateralAccount;
+        uint effectiveTime;
+        uint terminationDate;
+        bool cedentCommutationSigned;
+        bool reinsurerCommutationSigned;
+    }
+
+    Cedent[] public listCedents;
+
+    Reinsurer[] public listReinsurers;
+
+    QuotaShareAgreement[] public listQuotaShareAgreements;
+
+    function createQuotaShareAgreement (
+        string memory _name, 
+        string memory _cedentName, address _cedentAddress,
+        string memory _reinsurerName, address _reinsurerAddress,
+        uint8 _quotaShare,
+        uint _customTerminationDate
+        ) public {
+        
+        Cedent memory newCedent;
+        newCedent.name = _cedentName;
+        newCedent.cedentAddress = _cedentAddress;
+
+        Reinsurer memory newReinsurer;
+        newReinsurer.name = _reinsurerName;
+        newReinsurer.reinsurerAddress = _reinsurerAddress;
+        
+        QuotaShareAgreement memory newQuotaShareAgreement;
+        
+        newQuotaShareAgreement.name = _name;
+        newQuotaShareAgreement.cedent = newCedent;
+        newQuotaShareAgreement.reinsurer = newReinsurer;
+        newQuotaShareAgreement.quotaShare = _quotaShare;
+        newQuotaShareAgreement.effectiveTime = block.timestamp;
+
+        //this requires 0 to be entered as an input. _customTerminationDate is not initialized with 0. To be fixed later.
+        if (_customTerminationDate == 0){
+            newQuotaShareAgreement.terminationDate = block.timestamp + ONE_YEAR_IN_SECONDS;
+        } else {
+            newQuotaShareAgreement.terminationDate = block.timestamp + uint(_customTerminationDate);
+        }
+
+
+        listQuotaShareAgreements.push(newQuotaShareAgreement);
+        
+        nameToQuotaShareAgreement[newQuotaShareAgreement.name] = newQuotaShareAgreement;
+    
+    }
+
+function collateralizeQuotaShare(
+    string memory agreementName
+    ) public payable {
+
+        QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+
+        quotaShareAgreement.balanceCollateralAccount += msg.value;
+        
+        require(quotaShareAgreement.reinsurer.reinsurerAddress == msg.sender, "Error, not reinsurer");
+    }
+
+    function creditSettlementAccount (
+        string memory agreementName
+        ) public payable {
+
+            QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+
+            quotaShareAgreement.balanceSettlementAccount += msg.value;
+      
+            require(quotaShareAgreement.cedent.cedentAddress == msg.sender, "Error, not cedent");
+        }
+
+    function debitSettlementAccount (
+        string memory agreementName,
+        uint debitAmount
+        ) public  {
+
+            QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+
+            address payable to = payable(quotaShareAgreement.cedent.cedentAddress);
+            to.transfer(debitAmount);
+
+            if (quotaShareAgreement.balanceSettlementAccount >= debitAmount){
+                quotaShareAgreement.balanceSettlementAccount -= debitAmount;
+            } else {
+                uint debitToCollateralAccount = debitAmount - quotaShareAgreement.balanceSettlementAccount;
+                quotaShareAgreement.balanceSettlementAccount = 0;
+                quotaShareAgreement.balanceCollateralAccount -= debitToCollateralAccount;
+            }
+    
+            require(quotaShareAgreement.cedent.cedentAddress == msg.sender, "Error, not cedent");
+            require(debitAmount <= (quotaShareAgreement.balanceSettlementAccount + quotaShareAgreement.balanceCollateralAccount),
+                 "Insufficient funds");
+        }
+
+    function setCedentCommutationSigned (
+        string memory agreementName
+        ) public {
+            
+            QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+
+            quotaShareAgreement.cedentCommutationSigned = true;
+
+             if (block.timestamp < quotaShareAgreement.terminationDate){
+                if (quotaShareAgreement.reinsurerCommutationSigned == true)
+                    commuteQuotaShareAgreement(agreementName);
+                } else {
+                commuteQuotaShareAgreement(agreementName);
+            }
+
+            require(quotaShareAgreement.cedent.cedentAddress == msg.sender, "Error, not cedent");
+    }
+
+    function setReinsurerCommutationSigned (
+        string memory agreementName
+        ) public {
+            
+            QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+
+            quotaShareAgreement.reinsurerCommutationSigned = true;
+
+            if (block.timestamp < quotaShareAgreement.terminationDate){
+                if (quotaShareAgreement.cedentCommutationSigned == true)
+                    commuteQuotaShareAgreement(agreementName);
+                } else {
+                commuteQuotaShareAgreement(agreementName);
+            }
+            
+            require(quotaShareAgreement.reinsurer.reinsurerAddress == msg.sender, "Error, not reinsurer");
+    }
+
+    function commuteQuotaShareAgreement (
+        string memory agreementName
+        ) public {
+            
+            QuotaShareAgreement storage quotaShareAgreement = nameToQuotaShareAgreement[agreementName];
+            
+            address payable to = payable (quotaShareAgreement.reinsurer.reinsurerAddress);
+            to.transfer(quotaShareAgreement.balanceSettlementAccount + quotaShareAgreement.balanceCollateralAccount);
+        
+            quotaShareAgreement.balanceSettlementAccount = 0;
+            quotaShareAgreement.balanceCollateralAccount = 0;
+
+            quotaShareAgreement.commuted = true;
+
+        if (block.timestamp < quotaShareAgreement.terminationDate){
+            require(quotaShareAgreement.cedentCommutationSigned == true);
+            require(quotaShareAgreement.reinsurerCommutationSigned == true);
+            }
+        }
+
+    mapping (string => QuotaShareAgreement) nameToQuotaShareAgreement;
+
+        function getQuotaShareAgreement (string memory _name) public view returns(
+            string memory name,
+            string memory cedentName,
+            string memory reinsurerName,
+            bool commuted,
+            uint balanceSettlementAccount,
+            uint balanceCollateralAccount,
+            uint effectiveTime,
+            uint terminationDate,
+            bool cedentCommutationSigned,
+            bool reinsurerCommutationSigned
+        ) {
+            QuotaShareAgreement storage agreement;
+
+            agreement = nameToQuotaShareAgreement[_name];
+
+            name = agreement.name;
+            cedentName = agreement.cedent.name;
+            reinsurerName = agreement.reinsurer.name;
+            commuted = agreement.commuted;
+            balanceSettlementAccount = agreement.balanceSettlementAccount;
+            balanceCollateralAccount = agreement.balanceCollateralAccount;
+            effectiveTime = agreement.effectiveTime;
+            terminationDate = agreement.terminationDate;
+            cedentCommutationSigned = agreement.cedentCommutationSigned;
+            reinsurerCommutationSigned = agreement.reinsurerCommutationSigned;
+            }
+
+}
